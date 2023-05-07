@@ -1,4 +1,5 @@
 import argparse
+import os
 
 parser = argparse.ArgumentParser()
 
@@ -30,7 +31,18 @@ parser.add_argument("--dont-print-server", action="store_true", help="Don't prin
 parser.add_argument("--quick-test-for-ci", action="store_true", help="Quick test for CI.")
 parser.add_argument("--windows-standalone-build", action="store_true", help="Windows standalone build: Enable convenient things that most people using the standalone windows build will probably enjoy (like auto opening the page on startup).")
 
+# TODO: PiPPy
+parser.add_argument('--world_size', type=int, default=int(os.getenv("WORLD_SIZE", 2)))
+parser.add_argument('--pp_group_size', type=int, default=2)
+parser.add_argument('--rank', type=int, default=int(os.getenv("RANK", -1)))
+parser.add_argument('--master_addr', type=str, default=os.getenv('MASTER_ADDR', 'localhost'))
+parser.add_argument('--master_port', type=str, default=os.getenv('MASTER_PORT', '29500'))
+
 args = parser.parse_args()
+
+assert args.world_size % args.pp_group_size == 0
+args.dp_group_size = args.world_size // args.pp_group_size
+args.gspmd = 1
 
 if args.windows_standalone_build:
     args.auto_launch = True

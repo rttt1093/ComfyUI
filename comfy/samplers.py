@@ -4,6 +4,7 @@ from .extra_samplers import uni_pc
 import torch
 import contextlib
 from comfy import model_management
+from comfy.cli_args import args
 from .ldm.models.diffusion.ddim import DDIMSampler
 from .ldm.modules.diffusionmodules.util import make_ddim_timesteps
 import math
@@ -11,8 +12,8 @@ import math
 def lcm(a, b): #TODO: eventually replace by math.lcm (added in python3.9)
     return abs(a*b) // math.gcd(a, b)
 
-#The main sampling function shared by all the samplers
-#Returns predicted noise
+# The main sampling function shared by all the samplers
+# Returns predicted noise
 def sampling_function(model_function, x, timestep, uncond, cond, cond_scale, cond_concat=None, model_options={}):
         def get_area_and_mult(cond, x_in, cond_concat_in, timestep_in):
             area = (x_in.shape[2], x_in.shape[3], 0, 0)
@@ -424,7 +425,10 @@ def create_cond_with_same_area_if_none(conds, c):
     n = c[1].copy()
     conds += [[smallest[0], n]]
 
-def apply_empty_x_to_equal_area(conds, uncond, name, uncond_fill_func):
+def uncond_fill_func(cond_cnets, x):
+    return cond_cnets[x]
+
+def apply_empty_x_to_equal_area(conds, uncond, name):
     cond_cnets = []
     cond_other = []
     uncond_cnets = []
@@ -481,7 +485,7 @@ def encode_adm(noise_augmentor, conds, batch_size, device):
 
             if len(noise_aug) > 1:
                 adm_out = torch.stack(adm_inputs).sum(0)
-                #TODO: add a way to control this
+                # TODO: add a way to control this
                 noise_augment = 0.05
                 noise_level = round((noise_augmentor.max_noise_level - 1) * noise_augment)
                 c_adm, noise_level_emb = noise_augmentor(adm_out[:, :noise_augmentor.time_embed.dim], noise_level=torch.tensor([noise_level], device=device))
@@ -580,14 +584,14 @@ class KSampler:
         resolve_cond_masks(positive, noise.shape[2], noise.shape[3], self.device)
         resolve_cond_masks(negative, noise.shape[2], noise.shape[3], self.device)
 
-        #make sure each cond area has an opposite one with the same area
+        # make sure each cond area has an opposite one with the same area
         for c in positive:
             create_cond_with_same_area_if_none(negative, c)
         for c in negative:
             create_cond_with_same_area_if_none(positive, c)
 
-        apply_empty_x_to_equal_area(positive, negative, 'control', lambda cond_cnets, x: cond_cnets[x])
-        apply_empty_x_to_equal_area(positive, negative, 'gligen', lambda cond_cnets, x: cond_cnets[x])
+        apply_empty_x_to_equal_area(positive, negative, 'control')
+        apply_empty_x_to_equal_area(positive, negative, 'gligen')
 
         if self.model.model.diffusion_model.dtype == torch.float16:
             precision_scope = torch.autocast
@@ -621,6 +625,9 @@ class KSampler:
         else:
             max_denoise = True
 
+        # TODO: 推論をPiPPyでやるために定義
+        from pippy import run_pippy
+
         with precision_scope(model_management.get_autocast_device(self.device)):
             if self.sampler == "uni_pc":
                 samples = uni_pc.sample_unipc(self.model_wrap, noise, latent_image, sigmas, sampling_function=sampling_function, max_denoise=max_denoise, extra_args=extra_args, noise_mask=denoise_mask, callback=callback, disable=disable_pbar)
@@ -637,7 +644,8 @@ class KSampler:
                 ddim_callback = None
                 if callback is not None:
                     total_steps = len(timesteps) - 1
-                    ddim_callback = lambda pred_x0, i: callback(i, pred_x0, None, total_steps)
+                    def ddim_callback(pred_x0, i):
+                        return callback(i, pred_x0, None, total_steps)
 
                 sampler = DDIMSampler(self.model, device=self.device)
                 sampler.make_schedule_timesteps(ddim_timesteps=timesteps, verbose=False)
@@ -670,7 +678,8 @@ class KSampler:
                 k_callback = None
                 total_steps = len(sigmas) - 1
                 if callback is not None:
-                    k_callback = lambda x: callback(x["i"], x["denoised"], x["x"], total_steps)
+                    def k_callback(x):
+                        return callback(x["i"], x["denoised"], x["x"], total_steps)
 
                 if latent_image is not None:
                     noise += latent_image
@@ -679,6 +688,16 @@ class KSampler:
                 elif self.sampler == "dpm_adaptive":
                     samples = k_diffusion_sampling.sample_dpm_adaptive(self.model_k, noise, sigma_min, sigmas[0], extra_args=extra_args, callback=k_callback, disable=disable_pbar)
                 else:
-                    samples = getattr(k_diffusion_sampling, "sample_{}".format(self.sampler))(self.model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar)
+                    # TODO: pippyを実行
+                    k_diffusion_sampling_func = getattr(k_diffusion_sampling, "sample_{}".format(self.sampler))
+                    # samples = getattr(k_diffusion_sampling, "sample_{}".format(self.sampler))(self.model_k, noise, sigmas, extra_args=extra_args, callback=k_callback, disable=disable_pbar)
+                    # args.model = copy.deepcopy(self.model_k)
+                    args.model = self.model_k
+                    args.noise = noise
+                    args.sigmas = sigmas
+                    args.callback = k_callback
+                    args.disable = disable_pbar
+                    args.cuda = True
+                    samples = run_pippy(k_diffusion_sampling_func, args, extra_args)
 
         return samples.to(torch.float32)

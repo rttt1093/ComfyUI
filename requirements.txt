@@ -1,4 +1,4 @@
-torch
+torch==2.0.0
 torchdiffeq
 torchsde
 einops
@@ -9,3 +9,7 @@ pytorch_lightning
 aiohttp
 accelerate
 pyyaml
+-e git+https://github.com/rttt1093/PiPPy.git@multiprocessing_with_lambda#egg=torchpippy
+cloudpickle
+gorilla
+dask==2023.5.0
