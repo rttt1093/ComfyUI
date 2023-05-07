@@ -6,6 +6,9 @@ from torch import nn
 from torchdiffeq import odeint
 import torchsde
 from tqdm.auto import trange, tqdm
+import pippy
+from pippy import split_into_equal_size
+from pippy.IR import Pipe, MultiUseParameterConfig
 
 from . import utils
 
@@ -59,7 +62,12 @@ def get_ancestral_step(sigma_from, sigma_to, eta=1.):
 
 
 def default_noise_sampler(x):
-    return lambda sigma, sigma_next: torch.randn_like(x)
+    #return def f(x): return 2 * x
+    #return f = lambda x: 2*x
+    def f(sigma, sigma_next):
+        return torch.randn_like(x)
+    return f
+    #return lambda sigma, sigma_next: torch.randn_like(x)
 
 
 class BatchedBrownianTree:
@@ -136,13 +144,27 @@ def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None,
 
 
 @torch.no_grad()
-def sample_euler_ancestral(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
+def sample_euler_ancestral(pp_ranks, args, extra_args):
     """Ancestral sampling with Euler method steps."""
+    x = args.noise
+    sigmas = args.sigmas
+    callback = args.callback
+    disable = args.disable
+    eta = 1. if args.eta is None else args.eta
+    s_noise = 1. if args.s_noise is None else args.s_noise
+
     extra_args = {} if extra_args is None else extra_args
-    noise_sampler = default_noise_sampler(x) if noise_sampler is None else noise_sampler
+    noise_sampler = default_noise_sampler(x) if args.noise_sampler is None else args.noise_sampler
     s_in = x.new_ones([x.shape[0]])
+    driver = build_pippy_driver(pp_ranks, args)
+
+    if args.rank!=0:
+        return
+
     for i in trange(len(sigmas) - 1, disable=disable):
-        denoised = model(x, sigmas[i] * s_in, **extra_args)
+        # TODO: PiPPyを使いたい
+        denoised = driver(x, sigmas[i] * s_in, **extra_args)
+
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1], eta=eta)
         if callback is not None:
             callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
@@ -605,3 +627,17 @@ def sample_dpmpp_2m(model, x, sigmas, extra_args=None, callback=None, disable=No
             x = (sigma_fn(t_next) / sigma_fn(t)) * x - (-h).expm1() * denoised_d
         old_denoised = denoised
     return x
+
+def build_pippy_driver(pp_ranks, args):
+    number_of_workers = len(pp_ranks)  # 使いたいGPUの数
+    split_policy = split_into_equal_size(number_of_workers)
+    args.model.eval()
+
+    driver, _ = pippy.compile(
+        args.model,
+        num_ranks=args.world_size,
+        num_chunks=args.world_size,
+        schedule="FillDrain",
+        split_policy=split_policy,
+    )
+    return driver
